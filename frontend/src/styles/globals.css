@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  body {
+    @apply bg-cream text-ink font-sans;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-display text-ink tracking-tight;
+  }
+  /* Visible keyboard focus, kept even though the rest of the UI is quiet. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-gold-500 ring-offset-2 ring-offset-cream;
+  }
+}
+
+@layer utilities {
+  .reduce-motion {
+    @media (prefers-reduced-motion: reduce) {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+}
