@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 from backend.api.routes import auth, health, investigations
 from backend.config import get_settings
@@ -13,6 +14,11 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Required by Authlib's Starlette OAuth client: it stashes the OAuth
+# state/nonce here between the /google/login redirect and /google/callback.
+# Uses a distinct secret from JWT_SECRET_KEY (see config.py).
+app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY)
 
 app.add_middleware(
     CORSMiddleware,

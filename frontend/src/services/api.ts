@@ -59,4 +59,77 @@ export const authApi = {
     request<void>("/auth/logout", { method: "POST", token }),
 
   me: (token: string) => request<UserResponse>("/auth/me", { token }),
+
+  // Not a fetch call — this is a full browser navigation to the backend,
+  // which redirects on to Google's consent screen.
+  googleLoginUrl: () => `${API_BASE_URL}/auth/google/login`,
+};
+
+export interface AudioMetadataResponse {
+  original_filename: string;
+  content_type: string;
+  duration_seconds: number;
+  sample_rate: number;
+  channels: number;
+  file_size_bytes: number;
+  noise_level: number | null;
+  speech_duration_seconds: number | null;
+  silence_ratio: number | null;
+}
+
+export interface InvestigationResponse {
+  id: string;
+  filename: string;
+  status: string;
+  prediction: string | null;
+  confidence: number | null;
+  fraud_score: number | null;
+  processing_time_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+  audio_metadata: AudioMetadataResponse | null;
+}
+
+export interface InvestigationListResponse {
+  items: InvestigationResponse[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Multipart upload needs its own fetch call — `request()` always sets
+ * Content-Type: application/json, which would break the multipart boundary.
+ */
+async function uploadFile(token: string, file: File): Promise<InvestigationResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_BASE_URL}/investigations/analyze`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail ?? `Upload failed with status ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export const investigationsApi = {
+  analyze: (token: string, file: File) => uploadFile(token, file),
+
+  list: (token: string, limit = 20, offset = 0) =>
+    request<InvestigationListResponse>(`/investigations?limit=${limit}&offset=${offset}`, {
+      token,
+    }),
+
+  get: (token: string, id: string) =>
+    request<InvestigationResponse>(`/investigations/${id}`, { token }),
+
+  remove: (token: string, id: string) =>
+    request<void>(`/investigations/${id}`, { method: "DELETE", token }),
 };

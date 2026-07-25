@@ -70,6 +70,22 @@ export default function Login() {
             {loading ? "Signing in…" : "Sign in"}
           </Button>
         </form>
+
+        <div className="flex items-center gap-3 my-6">
+          <div className="h-px flex-1 bg-ink/10" />
+          <span className="text-xs text-ink-faint uppercase tracking-widest">or</span>
+          <div className="h-px flex-1 bg-ink/10" />
+        </div>
+
+        <Button
+          variant="secondary"
+          className="w-full"
+          onClick={() => {
+            window.location.href = authApi.googleLoginUrl();
+          }}
+        >
+          Continue with Google
+        </Button>
       </Card>
     </div>
   );

@@ -65,3 +65,13 @@ def test_login_wrong_password_rejected():
         json={"email": "analyst@aurivo.ai", "password": "wrongpassword"},
     )
     assert response.status_code == 401
+
+
+def test_google_login_redirects_to_google():
+    # Verifies the route/middleware wiring (SessionMiddleware, Authlib
+    # registration) without needing real Google credentials or network
+    # access — we only check that it redirects toward Google's OAuth
+    # endpoint, not that a full login completes.
+    response = client.get("/api/v1/auth/google/login", follow_redirects=False)
+    assert response.status_code in (302, 307)
+    assert "accounts.google.com" in response.headers["location"]

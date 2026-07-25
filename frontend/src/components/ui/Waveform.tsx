@@ -4,15 +4,21 @@ interface WaveformProps {
   bars?: number;
   animated?: boolean;
   className?: string;
+  /**
+   * Live amplitude levels (0–1) from useAudioRecorder. When provided, bars
+   * reflect actual mic input instead of the decorative idle animation —
+   * used on the Recording screen.
+   */
+  levels?: number[];
 }
 
 /**
- * Simple animated bar waveform used on Home / Recording screens.
- * Real waveform data (from actual audio) replaces the randomized heights
- * once the recording/upload pipeline lands in Phase 2.
+ * Bar waveform used on Home (decorative) and Recording (live) screens.
  */
-export function Waveform({ bars = 32, animated = true, className }: WaveformProps) {
-  const heights = Array.from({ length: bars }, (_, i) => 20 + ((i * 37) % 80));
+export function Waveform({ bars = 32, animated = true, className, levels }: WaveformProps) {
+  const heights = levels
+    ? levels.map((l) => Math.max(8, Math.min(100, l * 100)))
+    : Array.from({ length: bars }, (_, i) => 20 + ((i * 37) % 80));
 
   return (
     <div className={clsx("flex items-center gap-1 h-16", className)}>
@@ -21,11 +27,12 @@ export function Waveform({ bars = 32, animated = true, className }: WaveformProp
           key={i}
           className={clsx(
             "w-1 rounded-full bg-gold-500 reduce-motion",
-            animated && "animate-wave"
+            !levels && animated && "animate-wave"
           )}
           style={{
             height: `${h}%`,
-            animationDelay: `${i * 0.05}s`,
+            transition: levels ? "height 60ms linear" : undefined,
+            animationDelay: !levels ? `${i * 0.05}s` : undefined,
           }}
         />
       ))}
