@@ -47,6 +47,29 @@ services:
       redis:
         condition: service_healthy
 
+  # Runs AASIST inference (Phase 3). Separate image from `backend` since it
+  # needs torch/scipy, which the FastAPI web process itself never imports.
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://aurivo:aurivo@postgres:5432/aurivo
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ./backend:/app/backend
+      - ./ml:/app/ml
+      - aurivo_uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   frontend:
     build:
       context: .
@@ -61,11 +84,6 @@ services:
       - /app/node_modules
     depends_on:
       - backend
-
-  # NOTE: `worker` (Celery, running ml/inference on AASIST) is intentionally
-  # left out of Phase 1 — it comes online in Phase 3 once the AASIST
-  # inference wrapper exists. Adding it now would just be a container that
-  # crash-loops with nothing to do.
 
 volumes:
   aurivo_postgres_data:

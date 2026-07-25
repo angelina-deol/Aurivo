@@ -1,13 +1,11 @@
 """
 Investigation endpoints.
 
-Phase 2 makes `/analyze` real: it accepts an audio upload, validates it,
-extracts header-level metadata, stores the file (local disk or S3-compatible,
-see services/storage.py), and creates an Investigation + AudioMetadata row.
-
-It does NOT run AASIST — there's no ML worker yet. The row is created with
-status "awaiting_analysis" and prediction/confidence/fraud_score stay null
-until Phase 3 wires up the Celery worker + AASIST wrapper.
+`/analyze` accepts an audio upload, validates it, extracts header-level
+metadata, stores the file (local disk or S3-compatible, see
+services/storage.py), creates an Investigation + AudioMetadata row, and
+enqueues a Celery task (backend/workers/tasks.py) that runs AASIST inference
+and fills in prediction/confidence/fraud_score once it completes.
 """
 import uuid
 
@@ -17,12 +15,13 @@ from sqlalchemy.orm import Session
 from backend.auth.dependencies import get_current_user
 from backend.config import get_settings
 from backend.database.models.audio_metadata import AudioMetadata
-from backend.database.models.investigation import Investigation, STATUS_AWAITING_ANALYSIS
+from backend.database.models.investigation import Investigation, STATUS_FAILED, STATUS_PROCESSING
 from backend.database.models.user import User
 from backend.database.session import get_db
 from backend.schemas.investigation import InvestigationListResponse, InvestigationResponse
 from backend.services.audio_metadata import UnsupportedAudioError, extract_metadata
 from backend.services.storage import build_storage_key, get_storage_backend
+from backend.workers.tasks import analyze_investigation
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
 settings = get_settings()
@@ -80,7 +79,7 @@ def analyze(
     investigation = Investigation(
         user_id=current_user.id,
         filename=file.filename,
-        status=STATUS_AWAITING_ANALYSIS,
+        status=STATUS_PROCESSING,
     )
     db.add(investigation)
     db.flush()  # assign investigation.id before creating the child row
@@ -99,6 +98,21 @@ def analyze(
     )
     db.commit()
     db.refresh(investigation)
+
+    try:
+        analyze_investigation.delay(str(investigation.id))
+    except Exception:
+        # The upload itself succeeded — the file is stored and the row is
+        # committed. A broker connection failure here (e.g. Redis isn't
+        # running) shouldn't turn that success into a 500 for the client;
+        # mark the investigation failed instead so the UI shows the honest,
+        # already-built "analysis failed" state rather than the browser
+        # seeing an opaque server error on what was actually a successful
+        # upload.
+        investigation.status = STATUS_FAILED
+        db.commit()
+        db.refresh(investigation)
+
     return investigation
 
 

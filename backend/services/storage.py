@@ -7,10 +7,12 @@ S3_ENDPOINT_URL for MinIO/R2/etc — leave it unset for real AWS S3) to switch
 to S3-compatible storage without changing any calling code.
 """
 import os
+import tempfile
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Iterator
 
 from backend.config import get_settings
 
@@ -30,6 +32,14 @@ class StorageBackend(ABC):
     @abstractmethod
     def url_for(self, key: str) -> str:
         """Return a URL/path the rest of the app can use to fetch the file."""
+
+    @abstractmethod
+    def local_path(self, key: str) -> Iterator[str]:
+        """Yields a real filesystem path to the object, for callers (like
+        the AASIST inference wrapper) that need actual file I/O rather than
+        a URL. For local disk this is free; for S3-compatible storage it
+        downloads to a temp file first and cleans up afterward.
+        Concrete implementations should be decorated with @contextmanager."""
 
 
 class LocalDiskStorage(StorageBackend):
@@ -57,6 +67,10 @@ class LocalDiskStorage(StorageBackend):
 
     def url_for(self, key: str) -> str:
         return str(self._path(key))
+
+    @contextmanager
+    def local_path(self, key: str) -> Iterator[str]:
+        yield str(self._path(key))
 
 
 class S3CompatibleStorage(StorageBackend):
@@ -86,6 +100,18 @@ class S3CompatibleStorage(StorageBackend):
             Params={"Bucket": self._bucket, "Key": key},
             ExpiresIn=3600,
         )
+
+    @contextmanager
+    def local_path(self, key: str) -> Iterator[str]:
+        suffix = Path(key).suffix
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            self._client.download_file(self._bucket, key, tmp_path)
+            yield tmp_path
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 
 def get_storage_backend() -> StorageBackend:

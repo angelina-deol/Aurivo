@@ -13,6 +13,7 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
     full_name = Column(String(255), nullable=True)
+    avatar_url = Column(String(1024), nullable=True)  # from Google's userinfo "picture", null for local sign-up
 
     # Nullable because OAuth users (Google/GitHub) don't have a local password.
     hashed_password = Column(String(255), nullable=True)

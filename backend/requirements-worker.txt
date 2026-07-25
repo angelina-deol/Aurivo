@@ -1,0 +1,17 @@
+# Everything the web API needs, plus what the Celery worker additionally
+# needs to run AASIST inference. Installed only in the worker container
+# (docker/worker.Dockerfile) — the FastAPI web process never imports torch.
+-r requirements.txt
+
+scipy==1.14.1
+
+# CPU-only PyTorch. On Linux, `pip install torch` from plain PyPI pulls in
+# CUDA runtime packages (~2GB) even with no GPU present. Prefer the CPU
+# wheel index instead:
+#   pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+# macOS/Windows wheels from the line below are already CPU/MPS-capable and
+# don't need the extra index. docker/worker.Dockerfile uses the CPU index.
+# Verified: 2.7.1 has real cp313 wheels for both macOS arm64 and Linux
+# x86_64 via the CPU index (2.3.1 predates Python 3.13 support entirely and
+# has no wheels for it on any platform, which is what broke this before).
+torch==2.7.1

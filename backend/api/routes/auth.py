@@ -85,22 +85,26 @@ async def google_callback(request: Request, db: Session = Depends(get_db)):
     email = userinfo["email"]
     google_sub = userinfo["sub"]
     full_name = userinfo.get("name")
+    avatar_url = userinfo.get("picture")
 
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         user = User(
             email=email,
             full_name=full_name,
+            avatar_url=avatar_url,
             auth_provider="google",
             provider_id=google_sub,
             is_verified=bool(userinfo.get("email_verified")),
         )
         db.add(user)
-    elif user.auth_provider == "local":
-        # Same email already registered with a password. Link the Google
-        # identity to the existing account rather than creating a duplicate
-        # — the user can then sign in with either method.
-        user.provider_id = user.provider_id or google_sub
+    else:
+        # Keep the avatar in sync with Google on every login (their photo
+        # can change), and link a matching local-password account rather
+        # than creating a duplicate.
+        user.avatar_url = avatar_url or user.avatar_url
+        if user.auth_provider == "local":
+            user.provider_id = user.provider_id or google_sub
 
     db.commit()
     db.refresh(user)

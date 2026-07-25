@@ -3,9 +3,8 @@
 Enterprise AI-powered voice fraud & deepfake detection platform, built around
 the [AASIST](https://github.com/clovaai/aasist) anti-spoofing model.
 
-**Phase 1** (project structure, auth, design system) and **Phase 2**
-(recording, upload pipeline, storage) are done. No ML inference yet — that
-lands in Phase 3 once `ml/aasist` is in place (see `ml/README.md`).
+**Phase 1** (project structure, auth, design system), **Phase 2** (recording,
+upload pipeline, storage), and **Phase 3** (AASIST inference) are done.
 
 ## What's here
 
@@ -96,8 +95,96 @@ pytest tests -v
 ```
 
 Covers register → login → authenticated `/auth/me` → wrong-password
-rejection, running against an in-memory SQLite DB so it needs no services
-running.
+rejection, upload validation/rejection/ownership, Google OAuth login
+redirect, the AASIST worker task's DB-update logic (mocking only the
+torch-dependent prediction call), and the broker-dispatch-failure fallback
+below — all runnable with no external services (no Postgres, Redis, or GPU
+needed), 15 tests total.
+
+The whole suite is hermetic: every test file uses its own isolated
+in-memory SQLite database and never touches your real `.env`/`DATABASE_URL`
+— so it passes the same way whether you run it from the project root or
+from inside `backend/`, and whether or not `.env` exists. (An earlier
+version of `test_worker_task.py` didn't follow this — it used the real
+app-configured database connection, which broke if `.env` wasn't visible
+from wherever you ran pytest. Fixed.)
+
+**If uploads 500 with a Redis connection error:** `REDIS_URL` /
+`CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` default to the Docker-only
+hostname `redis`, which doesn't resolve outside Docker's network — same
+issue as `DATABASE_URL`'s `postgres` default. Get Redis running locally
+(`docker run -d -p 6379:6379 redis:7-alpine`, or a local install) and point
+those three at `localhost` in `.env` instead. Note that even with Redis
+unreachable, an upload now succeeds (202) with the investigation marked
+`failed` rather than 500ing — see "Deliberately not in Phase 3" below for
+why that fallback exists.
+
+**If the Docker backend container fails on startup with `OSError: cannot
+load library 'libsndfile.so'`:** an earlier version of `docker/
+backend.Dockerfile` installed the Python `soundfile` package (used on every
+upload to read WAV/FLAC metadata) without its system-level dependency,
+`libsndfile1`. The PyPI wheel doesn't bundle a working binary on every
+platform/architecture (this surfaced on arm64 builds, e.g. Docker Desktop
+on Apple Silicon). Fixed — both `docker/backend.Dockerfile` and `docker/
+worker.Dockerfile` now install `libsndfile1` via apt. Rebuild with `docker
+compose up --build` to pick it up.
+
+## Running the AASIST worker (Phase 3)
+
+Uploads only get analyzed if a Celery worker is actually running:
+
+```bash
+# needs Redis running (docker compose up -d redis, or a local install)
+pip install -r backend/requirements-worker.txt --extra-index-url https://download.pytorch.org/whl/cpu
+celery -A backend.workers.celery_app worker --loglevel=info
+```
+
+(Also run from the project root, same reason as everything else above.)
+Without a worker running, uploads sit at `status: "processing"` forever —
+the frontend polls but nothing will ever pick the job up.
+
+## What's implemented in Phase 3
+
+- [x] Real AASIST integration: `ml/aasist` is the actual upstream repo
+      (cloned and read directly to get the scoring convention and expected
+      input format right, not guessed), `ml/checkpoints` has the pretrained
+      weights (they're bundled in the upstream repo — corrected a wrong
+      assumption from Phase 1's README that they needed a manual download)
+- [x] `ml/preprocessing/audio.py` — resample to 16kHz, downmix to mono,
+      pad/tile to AASIST's fixed 64,600-sample window; tested directly
+      against generated audio (non-16kHz input, short clips, stereo)
+- [x] `ml/inference/aasist_wrapper.py` — loads the model once per worker
+      process, runs a real forward pass, softmaxes the 2 output logits into
+      an interpretable prediction/confidence/fraud-score
+- [x] Celery worker (`backend/workers/`), split into its own Docker image
+      (`docker/worker.Dockerfile`) so the FastAPI web process never needs to
+      install torch
+- [x] `/investigations/analyze` now enqueues real analysis; Investigation
+      status flows `processing` → `complete`/`failed`
+- [x] Frontend: the investigation detail page now polls while analysis is
+      in flight and renders the real prediction/confidence/fraud score, or
+      an honest failure message if the worker isn't running
+- [x] Tests: worker task's DB-update logic, missing-row handling, and
+      failure-path handling, all verified against a real (SQLite) database
+- [x] Upload is resilient to the Celery broker being unreachable: the
+      investigation is already committed by the time it's dispatched to
+      Celery, so a broker connection failure marks it `failed` and returns
+      202, rather than turning an already-successful upload into a 500
+- [x] Task result-tracking disabled (`task_ignore_result=True`) — nothing in
+      this app calls `.get()` on a task, since the frontend polls the
+      Investigation row's status directly. This also means a broker outage
+      fails in under a second instead of ~20-60s retrying an unused result
+      backend connection.
+
+### Known limitation
+
+The actual PyTorch forward pass has not been run end-to-end in the
+environment this was built in — no GPU was available there, and the
+CPU-only PyTorch wheel (`download.pytorch.org`) wasn't reachable over that
+sandbox's network. Everything up to the forward pass (preprocessing, config
+parsing, checkpoint path resolution, the "model not ready" error path) was
+tested directly; the forward pass itself needs to be verified on a real
+machine. See `ml/README.md` for more detail.
 
 ## What's implemented in Phase 1
 
@@ -195,3 +282,17 @@ duplicate.
   `api.github.com/user` call for profile info).
 - Account linking UI — linking happens automatically by email match; there's
   no "connect your Google account" flow inside a logged-in session yet.
+
+## Profile icon / login state
+
+Every page now has a shared header (`components/Layout.tsx`) with a profile
+icon in the top right: your real Google photo if you signed in with Google,
+an initials circle otherwise (or if the image fails to load), and a "Sign
+in" link when logged out. Click it for a dropdown with sign-out.
+
+Auth tokens are now persisted to `localStorage` (`hooks/useAuthStore.ts`)
+rather than kept in memory only — that was a real bug fix, not just a nice-
+to-have: without it, refreshing the page silently logged you out, which
+would have made the profile icon meaningless as a way to confirm login
+state. (Worth hardening to httpOnly cookies before this goes to production —
+localStorage tokens are readable by any XSS that gets into the page.)

@@ -1,7 +1,9 @@
 import io
 import shutil
 import wave
+from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -37,6 +39,16 @@ app.dependency_overrides[get_db] = override_get_db
 get_settings().LOCAL_STORAGE_DIR = TEST_UPLOAD_DIR
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _mock_celery_dispatch():
+    """Every test in this file exercises the upload endpoint, not the
+    inference pipeline itself — patch out the actual Celery enqueue so
+    these don't need Redis running (and don't hang for ~60s retrying a
+    connection that isn't there)."""
+    with patch("backend.api.routes.investigations.analyze_investigation.delay") as mock_delay:
+        yield mock_delay
 
 
 def _make_wav_bytes(duration_seconds: float = 1.0, sample_rate: int = 16000) -> bytes:
@@ -77,7 +89,7 @@ def test_upload_valid_wav_creates_investigation():
 
     assert response.status_code == 202
     body = response.json()
-    assert body["status"] == "awaiting_analysis"
+    assert body["status"] == "processing"
     assert body["prediction"] is None
     assert body["audio_metadata"]["sample_rate"] == 16000
     assert body["audio_metadata"]["channels"] == 1
@@ -121,6 +133,29 @@ def test_upload_requires_auth():
         files={"file": ("sample.wav", wav_bytes, "audio/wav")},
     )
     assert response.status_code == 401
+
+
+def test_upload_succeeds_even_if_broker_dispatch_fails():
+    """If enqueueing to Celery fails (e.g. Redis is unreachable), the
+    upload — which already succeeded and was committed — should still
+    return 202 with an honest 'failed' status, not a 500. The investigation
+    was already created by the time we dispatch; a broker outage shouldn't
+    turn a successful upload into a server error for the client."""
+    headers = _auth_headers()
+    wav_bytes = _make_wav_bytes()
+
+    with patch(
+        "backend.api.routes.investigations.analyze_investigation.delay",
+        side_effect=ConnectionError("broker unreachable"),
+    ):
+        response = client.post(
+            "/api/v1/investigations/analyze",
+            headers=headers,
+            files={"file": ("broker-down.wav", wav_bytes, "audio/wav")},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "failed"
 
 
 def test_list_get_delete_investigation():
