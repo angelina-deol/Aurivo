@@ -14,6 +14,7 @@ class AudioMetadataResponse(BaseModel):
     noise_level: float | None = None
     speech_duration_seconds: float | None = None
     silence_ratio: float | None = None
+    has_spectrogram: bool = False
 
     class Config:
         from_attributes = True

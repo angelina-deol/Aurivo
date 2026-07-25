@@ -10,6 +10,7 @@ and fills in prediction/confidence/fraud_score once it completes.
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from backend.auth.dependencies import get_current_user
@@ -167,7 +168,63 @@ def delete_investigation(
     if investigation.audio_metadata:
         storage = get_storage_backend()
         storage.delete(investigation.audio_metadata.storage_key)
+        if investigation.audio_metadata.spectrogram_storage_key:
+            storage.delete(investigation.audio_metadata.spectrogram_storage_key)
 
     db.delete(investigation)
     db.commit()
     return None
+
+
+def _get_owned_investigation(
+    investigation_id: uuid.UUID, current_user: User, db: Session
+) -> Investigation:
+    investigation = (
+        db.query(Investigation)
+        .filter(Investigation.id == investigation_id, Investigation.user_id == current_user.id)
+        .first()
+    )
+    if not investigation or not investigation.audio_metadata:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Investigation not found")
+    return investigation
+
+
+@router.get("/{investigation_id}/audio")
+def get_investigation_audio(
+    investigation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Streams the original uploaded/recorded audio, for the waveform
+    viewer's playback. Requires auth + ownership, same as everything else
+    here — unlike a public S3 URL, this doesn't leak audio to anyone who
+    guesses an investigation ID."""
+    investigation = _get_owned_investigation(investigation_id, current_user, db)
+    storage = get_storage_backend()
+    with storage.local_path(investigation.audio_metadata.storage_key) as path:
+        with open(path, "rb") as f:
+            data = f.read()
+
+    media_type = investigation.audio_metadata.content_type or "application/octet-stream"
+    return Response(content=data, media_type=media_type)
+
+
+@router.get("/{investigation_id}/spectrogram")
+def get_investigation_spectrogram(
+    investigation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    investigation = _get_owned_investigation(investigation_id, current_user, db)
+    if not investigation.audio_metadata.spectrogram_storage_key:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No spectrogram available yet for this investigation.",
+        )
+
+    storage = get_storage_backend()
+    with storage.local_path(investigation.audio_metadata.spectrogram_storage_key) as path:
+        with open(path, "rb") as f:
+            data = f.read()
+
+    return Response(content=data, media_type="image/png")

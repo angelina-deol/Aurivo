@@ -4,6 +4,7 @@
 -r requirements.txt
 
 scipy==1.14.1
+matplotlib==3.11.1
 
 # CPU-only PyTorch. On Linux, `pip install torch` from plain PyPI pulls in
 # CUDA runtime packages (~2GB) even with no GPU present. Prefer the CPU

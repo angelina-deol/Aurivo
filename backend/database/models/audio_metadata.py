@@ -29,4 +29,14 @@ class AudioMetadata(Base):
     speech_duration_seconds = Column(Float, nullable=True)
     silence_ratio = Column(Float, nullable=True)
 
+    # Populated by the Celery worker after a successful upload (Phase 4) —
+    # a rendered spectrogram PNG, stored via the same storage backend as
+    # the original audio. Generated independently of whether AASIST
+    # inference itself succeeds, since it's useful regardless.
+    spectrogram_storage_key = Column(String(512), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    @property
+    def has_spectrogram(self) -> bool:
+        return self.spectrogram_storage_key is not None

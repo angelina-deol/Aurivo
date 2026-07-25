@@ -131,17 +131,48 @@ compose up --build` to pick it up.
 
 ## Running the AASIST worker (Phase 3)
 
+**Upgrading from before Phase 4? Run the migration again.** Phase 4 added
+a new column (`spectrogram_storage_key` on `audio_metadata`). Same two
+commands as always:
+```bash
+docker compose exec backend alembic -c backend/alembic.ini revision --autogenerate -m "add spectrogram column"
+docker compose exec backend alembic -c backend/alembic.ini upgrade head
+```
+
 Uploads only get analyzed if a Celery worker is actually running:
 
 ```bash
 # needs Redis running (docker compose up -d redis, or a local install)
 pip install -r backend/requirements-worker.txt --extra-index-url https://download.pytorch.org/whl/cpu
-celery -A backend.workers.celery_app worker --loglevel=info
+python -m celery -A backend.workers.celery_app worker --loglevel=info --pool=solo
 ```
 
 (Also run from the project root, same reason as everything else above.)
 Without a worker running, uploads sit at `status: "processing"` forever —
 the frontend polls but nothing will ever pick the job up.
+
+**Use `python -m celery`, not the bare `celery` command — this one is
+subtle and easy to get bitten by even with everything else configured
+correctly.** The bare `celery` console script only adds the working
+directory to Python's import path *temporarily*, just long enough to load
+the app passed to `-A` — then explicitly removes it again. That means
+`backend.*` imports work fine (they happen during that window), but
+`ml.inference.aasist_wrapper` — imported lazily inside the task body, which
+runs later at actual task-execution time — fails with `ModuleNotFoundError:
+No module named 'ml'`, even when `ml/` is correctly present on disk and
+correctly mounted in Docker. This can look exactly like a missing-volume
+problem (task registers fine, `ls /app/ml` shows the folder, everything
+*looks* right) when the actual cause is which command started Celery.
+`python -m celery` keeps the working directory on the path for the whole
+process and avoids this. `docker/worker.Dockerfile` already uses this form.
+
+**`--pool=solo` matters, not optional:** Celery's default pool forks worker
+processes, and PyTorch's native thread pool is known to deadlock after a
+fork — the task just hangs forever with no error, no log line, nothing.
+`solo` runs single-process with no forking, which avoids it entirely. This
+worker only processes one AASIST inference at a time either way, so nothing
+is lost — scale by running more worker containers, not more forked
+processes inside one. `docker/worker.Dockerfile` already sets this.
 
 ## What's implemented in Phase 3
 
@@ -185,6 +216,61 @@ sandbox's network. Everything up to the forward pass (preprocessing, config
 parsing, checkpoint path resolution, the "model not ready" error path) was
 tested directly; the forward pass itself needs to be verified on a real
 machine. See `ml/README.md` for more detail.
+
+### Update on the known limitation above
+
+The forward pass has since been confirmed working end-to-end on a real
+machine (Docker, Apple Silicon) — real predictions come back, not just
+plumbing. Worth knowing: predictions currently tend toward extreme 0%/100%
+confidence rather than nuanced middle values. That's consistent with
+AASIST's known limitation as a raw-waveform model trained on a single 2019
+dataset (ASVspoof2019 LA) — it wasn't exposed to modern voice-cloning
+techniques or diverse real-world recording conditions during training, and
+models tend to be overconfident on data outside what they were trained on
+rather than appropriately uncertain. Current research points to
+SSL-frontend variants (e.g. wav2vec2/XLSR + AASIST-style backend, often
+called "Wav2Vec2-AASIST" in the literature) as meaningfully better at
+generalizing to real-world audio — worth considering if prototype accuracy
+becomes a priority, though that would be a deviation from the original
+PRD's non-goal of not modifying the model architecture.
+
+## What's implemented in Phase 4
+
+- [x] `GET /investigations/{id}/audio` and `GET /investigations/{id}/
+      spectrogram` — stream the original audio and a generated spectrogram
+      image, both auth + ownership-checked (not a public URL — someone
+      guessing an investigation ID can't listen to someone else's
+      recording)
+- [x] Real spectrogram generation (`ml/preprocessing/spectrogram.py`) — an
+      actual STFT via scipy on the original full-duration audio (not the
+      resampled/tiled 4-second window AASIST itself sees), rendered via
+      matplotlib's headless Agg backend. Verified by visually inspecting a
+      generated spectrogram against a known two-tone test signal — the
+      expected two horizontal frequency bands show up correctly.
+      Generation is a soft failure by design: if it breaks, the
+      investigation still completes with a real fraud prediction, just
+      without an attached spectrogram
+- [x] Real interactive waveform player (`WaveformPlayer.tsx`) — decodes the
+      actual audio via the Web Audio API and renders real peak data on a
+      canvas (not a decorative animation), with click-to-seek, play/pause,
+      and zoom
+- [x] Spectrogram viewer (`SpectrogramView.tsx`) — the generated image with
+      zoom and an approximate time/frequency hover readout
+- [x] Confidence analytics (`ConfidenceGraph.tsx`) — a hand-built SVG donut
+      showing the real/AI-generated split and fraud score, matching the
+      app's own design system rather than a charting library's defaults
+- [x] Tests: real spectrogram generation against a real generated WAV file
+      (not mocked), and confirmation that a broken spectrogram doesn't
+      block the investigation from completing — 18 tests total, all
+      passing
+
+### Deliberately not in Phase 4
+
+Per the PRD's own roadmap, explainability (attention overlays, "suspicious
+regions" timeline, LLM-generated summaries) is Phase 6, not Phase 4 — not
+built yet, and not the same thing as what's here. What's here is the
+report's waveform/spectrogram/confidence visualization; not yet an
+explanation of *why* the model decided what it decided.
 
 ## What's implemented in Phase 1
 

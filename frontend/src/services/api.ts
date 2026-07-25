@@ -76,6 +76,7 @@ export interface AudioMetadataResponse {
   noise_level: number | null;
   speech_duration_seconds: number | null;
   silence_ratio: number | null;
+  has_spectrogram: boolean;
 }
 
 export interface InvestigationResponse {
@@ -133,4 +134,29 @@ export const investigationsApi = {
 
   remove: (token: string, id: string) =>
     request<void>(`/investigations/${id}`, { method: "DELETE", token }),
+
+  /**
+   * Both the raw audio and the spectrogram image require the auth header,
+   * so a plain <audio src="..."> or <img src="..."> won't work — the
+   * browser doesn't attach Authorization headers to those. Fetch the bytes
+   * ourselves and hand back an object URL instead.
+   */
+  audioBlobUrl: async (token: string, id: string): Promise<string> => {
+    const response = await fetch(`${API_BASE_URL}/investigations/${id}/audio`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`Could not load audio (status ${response.status})`);
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  },
+
+  spectrogramBlobUrl: async (token: string, id: string): Promise<string | null> => {
+    const response = await fetch(`${API_BASE_URL}/investigations/${id}/spectrogram`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null; // not generated (yet, or generation failed)
+    if (!response.ok) throw new Error(`Could not load spectrogram (status ${response.status})`);
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  },
 };

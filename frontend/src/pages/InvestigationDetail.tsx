@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
+import { ConfidenceGraph } from "@/components/ConfidenceGraph";
+import { SpectrogramView } from "@/components/SpectrogramView";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Waveform } from "@/components/ui/Waveform";
+import { WaveformPlayer } from "@/components/WaveformPlayer";
 import { useAuthStore } from "@/hooks/useAuthStore";
 import { investigationsApi, InvestigationResponse } from "@/services/api";
 
 const POLL_INTERVAL_MS = 2500;
+// A real AASIST forward pass takes seconds, not minutes. If it's still
+// "processing" after this long, something is actually stuck (crashed
+// worker, hung task) rather than just slow — surface that honestly instead
+// of polling in silence forever.
+const STUCK_THRESHOLD_MS = 60_000;
 
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -21,12 +29,18 @@ export default function InvestigationDetail() {
   const [investigation, setInvestigation] = useState<InvestigationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [seemsStuck, setSeemsStuck] = useState(false);
   const pollRef = useRef<number | null>(null);
+
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [spectrogramUrl, setSpectrogramUrl] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id || !accessToken) return;
 
     let cancelled = false;
+    const startedPollingAt = Date.now();
 
     async function fetchOnce() {
       try {
@@ -35,10 +49,10 @@ export default function InvestigationDetail() {
         setInvestigation(result);
         setLoading(false);
 
-        // Keep polling while analysis is in flight; a real AASIST forward
-        // pass typically finishes in a few seconds, but this covers queueing
-        // delay too if the worker is busy with other investigations.
-        if (result.status === "processing" || result.status === "awaiting_analysis") {
+        const stillInFlight = result.status === "processing" || result.status === "awaiting_analysis";
+
+        if (stillInFlight) {
+          setSeemsStuck(Date.now() - startedPollingAt > STUCK_THRESHOLD_MS);
           pollRef.current = window.setTimeout(fetchOnce, POLL_INTERVAL_MS);
         }
       } catch (err) {
@@ -56,15 +70,51 @@ export default function InvestigationDetail() {
     };
   }, [id, accessToken]);
 
+  // Fetch audio + spectrogram blobs once the investigation has settled
+  // (any terminal-ish state with stored audio) — not while still
+  // "processing", since the file is already there from upload but there's
+  // no point re-fetching before the page needs it.
+  useEffect(() => {
+    if (!id || !accessToken || !investigation?.audio_metadata) return;
+    const createdUrls: string[] = [];
+
+    investigationsApi
+      .audioBlobUrl(accessToken, id)
+      .then((url) => {
+        createdUrls.push(url);
+        setAudioUrl(url);
+      })
+      .catch((err) => setMediaError(err instanceof Error ? err.message : "Could not load audio"));
+
+    if (investigation.audio_metadata.has_spectrogram) {
+      investigationsApi
+        .spectrogramBlobUrl(accessToken, id)
+        .then((url) => {
+          if (url) {
+            createdUrls.push(url);
+            setSpectrogramUrl(url);
+          }
+        })
+        .catch(() => {
+          /* spectrogram is a nice-to-have; a failure here isn't worth surfacing as an error */
+        });
+    }
+
+    return () => {
+      createdUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, accessToken, investigation?.audio_metadata?.has_spectrogram]);
+
   return (
     <div className="min-h-screen bg-cream px-6 py-12 md:px-16">
-      <div className="max-w-2xl mx-auto">
+      <div className="max-w-2xl mx-auto space-y-6">
         {loading && <p className="text-ink-muted">Loading…</p>}
         {error && <p className="text-risk-danger">{error}</p>}
 
         {investigation && (
           <>
-            <Card className="mb-6">
+            <Card>
               <CardHeader>
                 <CardTitle>{investigation.filename}</CardTitle>
               </CardHeader>
@@ -76,6 +126,19 @@ export default function InvestigationDetail() {
                   <p className="text-ink-muted text-sm">
                     Running AASIST analysis on this recording…
                   </p>
+                  {seemsStuck && (
+                    <div className="mt-4 rounded-2xl bg-gold-50 border border-gold-100 p-4 text-sm text-ink-muted text-left">
+                      This is taking much longer than a real analysis
+                      normally does (a forward pass is usually seconds, not
+                      minutes). It's likely stuck rather than just slow —
+                      check the worker's logs for an error, or confirm a
+                      worker is actually running (
+                      <code className="font-mono text-xs">
+                        docker compose ps
+                      </code>
+                      ).
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -88,25 +151,26 @@ export default function InvestigationDetail() {
               )}
 
               {investigation.status === "complete" && (
-                <div className="text-center py-6">
-                  <p className="font-mono text-xs uppercase tracking-widest text-ink-faint mb-2">
+                <div className="py-4">
+                  <p className="text-center font-mono text-xs uppercase tracking-widest text-ink-faint mb-1">
                     Voice authenticity
                   </p>
-                  <p className="font-display text-4xl font-semibold text-ink mb-1">
+                  <p className="text-center font-display text-3xl font-semibold text-ink mb-6">
                     {investigation.prediction === "ai_generated" ? "AI Generated" : "Real"}
                   </p>
-                  <p className="font-mono text-2xl text-gold-600 mb-1">
-                    {investigation.confidence !== null
-                      ? `${Math.round(investigation.confidence * 100)}%`
-                      : "—"}
-                  </p>
-                  {investigation.fraud_score !== null && (
-                    <p className="text-sm text-ink-muted">
-                      Fraud score: {Math.round(investigation.fraud_score)} / 100
-                    </p>
+
+                  {investigation.confidence !== null && investigation.fraud_score !== null && (
+                    <div className="flex justify-center mb-4">
+                      <ConfidenceGraph
+                        prediction={investigation.prediction ?? "real"}
+                        confidence={investigation.confidence}
+                        fraudScore={investigation.fraud_score}
+                      />
+                    </div>
                   )}
+
                   {investigation.processing_time_seconds !== null && (
-                    <p className="text-xs text-ink-faint mt-2">
+                    <p className="text-center text-xs text-ink-faint">
                       Analyzed in {investigation.processing_time_seconds.toFixed(1)}s
                     </p>
                   )}
@@ -141,6 +205,33 @@ export default function InvestigationDetail() {
                     </dd>
                   </div>
                 </dl>
+              </Card>
+            )}
+
+            {mediaError && <p className="text-sm text-risk-danger">{mediaError}</p>}
+
+            {audioUrl && investigation.audio_metadata && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Waveform</CardTitle>
+                </CardHeader>
+                <WaveformPlayer
+                  audioUrl={audioUrl}
+                  durationSeconds={investigation.audio_metadata.duration_seconds}
+                />
+              </Card>
+            )}
+
+            {spectrogramUrl && investigation.audio_metadata && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Spectrogram</CardTitle>
+                </CardHeader>
+                <SpectrogramView
+                  imageUrl={spectrogramUrl}
+                  durationSeconds={investigation.audio_metadata.duration_seconds}
+                  sampleRate={investigation.audio_metadata.sample_rate}
+                />
               </Card>
             )}
           </>
