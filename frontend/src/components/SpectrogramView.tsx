@@ -1,9 +1,12 @@
 import { useRef, useState } from "react";
 
+import { AttentionRegion } from "@/services/api";
+
 interface SpectrogramViewProps {
   imageUrl: string;
   durationSeconds: number;
   sampleRate: number;
+  attentionRegions?: AttentionRegion[] | null;
 }
 
 /**
@@ -15,8 +18,19 @@ interface SpectrogramViewProps {
  * known clip duration) and frequency (using the Nyquist frequency, sr/2,
  * since that's the full range scipy.signal.spectrogram covers) rather than
  * requiring the backend to embed exact axis metadata.
+ *
+ * attentionRegions (Phase 6) draws translucent vertical bands over the
+ * time ranges AASIST's internal attention weighted most heavily — see
+ * ml/inference/aasist_wrapper.py for exactly what this does and doesn't
+ * mean (it's the model's first-stage temporal attention, not a full
+ * attribution of the final verdict).
  */
-export function SpectrogramView({ imageUrl, durationSeconds, sampleRate }: SpectrogramViewProps) {
+export function SpectrogramView({
+  imageUrl,
+  durationSeconds,
+  sampleRate,
+  attentionRegions,
+}: SpectrogramViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [hover, setHover] = useState<{ time: number; freq: number; x: number; y: number } | null>(
@@ -51,6 +65,25 @@ export function SpectrogramView({ imageUrl, durationSeconds, sampleRate }: Spect
           style={{ width: `${100 * zoom}%`, display: "block" }}
           draggable={false}
         />
+
+        {attentionRegions?.map((region, i) => {
+          if (durationSeconds <= 0) return null;
+          const leftPct = (region.start / durationSeconds) * 100;
+          const widthPct = ((region.end - region.start) / durationSeconds) * 100;
+          return (
+            <div
+              key={i}
+              className="absolute top-0 bottom-0 pointer-events-none"
+              style={{
+                left: `${leftPct}%`,
+                width: `${Math.max(widthPct, 0.5)}%`,
+                backgroundColor: "rgba(232, 179, 48, 0.35)",
+                opacity: 0.4 + region.salience * 0.6,
+              }}
+            />
+          );
+        })}
+
         {hover && (
           <div
             className="absolute pointer-events-none bg-ink text-cream text-xs font-mono rounded px-2 py-1"
@@ -60,6 +93,13 @@ export function SpectrogramView({ imageUrl, durationSeconds, sampleRate }: Spect
           </div>
         )}
       </div>
+
+      {attentionRegions && attentionRegions.length > 0 && (
+        <p className="text-xs text-ink-faint mt-2">
+          Gold bands show where the model's attention was most concentrated — see the report
+          notes for what this does and doesn't mean.
+        </p>
+      )}
 
       <div className="flex items-center justify-end gap-1 mt-2">
         <button

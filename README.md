@@ -139,6 +139,15 @@ docker compose exec backend alembic -c backend/alembic.ini revision --autogenera
 docker compose exec backend alembic -c backend/alembic.ini upgrade head
 ```
 
+**Upgrading from before Phase 6? Same again.** Phase 6 added two more
+columns (`ai_explanation`, `attention_regions` on `investigations`):
+```bash
+docker compose exec backend alembic -c backend/alembic.ini revision --autogenerate -m "add explanation and attention columns"
+docker compose exec backend alembic -c backend/alembic.ini upgrade head
+```
+Also rebuild both images (`docker compose up --build`) — Phase 6 changed
+both Dockerfiles to run as a non-root user.
+
 Uploads only get analyzed if a Celery worker is actually running:
 
 ```bash
@@ -271,6 +280,129 @@ regions" timeline, LLM-generated summaries) is Phase 6, not Phase 4 — not
 built yet, and not the same thing as what's here. What's here is the
 report's waveform/spectrogram/confidence visualization; not yet an
 explanation of *why* the model decided what it decided.
+
+## What's implemented in Phase 5
+
+- [x] `GET /investigations` extended with real search (`?search=` matches
+      filename substring, case-insensitive), status filter (`?status=`),
+      and prediction filter (`?prediction=`) — all combinable
+- [x] `GET /investigations/stats` — aggregate stats for the dashboard:
+      total analyses, today's count, fraud-detected count, real count,
+      average confidence, average processing time, plus 14-day time series
+      for daily uploads, daily fraud rate ("detection trend"), and daily
+      average latency, plus a 10-bucket confidence histogram. Computed in
+      Python rather than DB-specific date-truncation SQL, since Postgres
+      and SQLite disagree on how to do that and this needs to work
+      correctly on both the dev/test path and the real deployment
+- [x] `History.tsx` — searchable (debounced as you type), filterable
+      (status + prediction dropdowns), paginated investigation list
+- [x] `Dashboard.tsx` — 4 summary cards + 5 charts (detection trend, daily
+      uploads, real/AI-generated distribution, confidence histogram,
+      processing latency), built with `recharts`
+- [x] Nav links (Dashboard, History) added to the header for logged-in
+      users
+- [x] Tests: search, status filter, prediction filter, and stats
+      aggregation against known values, plus an auth-required check — 23
+      backend tests total, all passing
+
+### Bugs caught while building this phase
+
+- Two of my own new tests initially failed: one from the same
+  UUID-string-vs-`uuid.UUID` mismatch that's bitten this project's
+  production code before, this time in a test helper; the other from an
+  incorrect assumption of test isolation — `test_investigations.py`
+  reuses one hardcoded user across the whole file, so an unscoped stats
+  test picked up other tests' investigations too. Fixed by converting the
+  UUID properly and giving the stats test its own dedicated user.
+- Adding `recharts` pushed the frontend's main JS bundle to 652KB. Rather
+  than let that slide, lazy-loaded the Dashboard route — confirmed via a
+  real production build that the main bundle dropped to 238KB, with
+  charting code split into its own chunk that only loads when someone
+  actually visits `/dashboard`.
+
+### Deliberately not in Phase 5
+
+The PRD's sidebar mockup (Overview / Investigations / Analytics / History
+/ Settings) became simple top-nav links instead of a full sidebar layout,
+since the app's existing header-based layout didn't call for a bigger
+navigation restructure just for two new pages. A "Settings" page and a
+distinct "Analytics" page separate from "Dashboard" weren't built — the
+Dashboard page covers what the PRD's Analytics screen describes.
+
+## What's implemented in Phase 6
+
+**LLM-generated explanations** — `backend/services/llm_explanation.py`
+calls the Anthropic API, grounded *only* in real data the pipeline actually
+has (prediction, confidence, fraud score, audio metadata, attention
+regions when available). The prompt explicitly forbids inventing specific
+technical claims beyond that data — it would be easy for an LLM to
+produce a confident-sounding but fabricated detail like "spectral
+artifacts at 2.3s" with no real analysis behind it, and this is guarded
+against directly, with a regression test that the instruction stays in
+the prompt. Falls back to a plain template (not trying to sound like an
+LLM wrote it) if `ANTHROPIC_API_KEY` isn't set, or if the API call fails —
+same soft-failure pattern as spectrogram generation. Set
+`ANTHROPIC_API_KEY` and optionally `ANTHROPIC_MODEL` in `.env` to enable
+real explanations.
+
+**Attention-based explainability** — `ml/inference/aasist_wrapper.py` now
+captures AASIST's real internal temporal graph-attention weights via a
+monkeypatch that observes a value the model already computes internally
+but doesn't return, changing nothing about what it predicts. Attention is
+mapped back to real time regions using runtime tensor shapes rather than
+hand-computed downsampling arithmetic — deliberately avoided guessing the
+exact conv/pool math by hand, since a wrong guess would produce a
+confidently-wrong overlay, worse than no overlay at all. Correctly folds
+attention regions back onto the original clip's timeline for clips shorter
+than AASIST's fixed ~4.06s analysis window (which get tiled/repeated to
+fill it).
+
+Displayed as translucent gold bands over the spectrogram
+(`SpectrogramView.tsx`), with an explicit caveat in the UI about what the
+overlay does and doesn't mean.
+
+### Known limitation (same shape as Phase 3's, worth reading if you hit it)
+
+The bucketing/time-folding/normalization *math* is fully verified — 7
+direct tests covering long clips, short/tiled clips, edge cases like
+uniform salience (would otherwise divide by zero) and empty input. What's
+**not** verified is the actual tensor reduction against a real model
+(`att_map.mean(dim=1)`) — this sandbox couldn't fit a full torch install to
+test it (confirmed via a real download-size check: the CPU wheel needs
+room this environment didn't have, not a network block). The code is
+structured so the untested part is a single line feeding into fully-tested
+math, but you should sanity-check a real investigation's attention regions
+before trusting them, the same way the original AASIST forward pass
+needed your verification before Phase 3 was considered solid.
+
+**Docker/CI hardening:**
+- [x] Both `backend.Dockerfile` and `worker.Dockerfile` now run as a
+      dedicated non-root user (Celery explicitly warns when run as root;
+      good practice for the backend image too) — with `/app/uploads`
+      chowned *before* the volume mount initializes, so the named volume
+      inherits correct ownership
+- [x] Added `.dockerignore` — keeps build context lean and makes sure
+      `.env`/local `.db` files can never end up baked into an image layer
+- [x] CI now includes a `docker-build` job that actually builds both
+      Dockerfiles on every push (layer-cached via GitHub Actions' cache
+      backend so it doesn't re-download torch every run) — this project
+      hit several real build-breaking issues (bad version pins, a missing
+      system package) that only surfaced when someone tried `docker
+      compose up` by hand; this catches that class of problem in CI
+      instead
+- [x] **Honestly flagged**: this sandbox has no Docker available to
+      actually run `docker build` and confirm the CI job works — verified
+      the YAML parses correctly and reviewed the Dockerfiles carefully,
+      but this hasn't been executed for real the way most of this
+      project's other claims have been
+
+### Deliberately not in Phase 6
+
+Broader performance optimization (query result caching, CDN for static
+assets, horizontal scaling guidance) wasn't built out as a distinct
+initiative — the concrete, verifiable pieces (bundle splitting in Phase 5,
+non-root/leaner Docker images here) were prioritized over speculative
+optimization with no specific bottleneck driving it.
 
 ## What's implemented in Phase 1
 

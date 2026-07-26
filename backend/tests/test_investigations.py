@@ -207,3 +207,137 @@ def test_get_investigation_not_owned_by_user_is_404():
 
     response = client.get(f"/api/v1/investigations/{investigation_id}", headers=headers_b)
     assert response.status_code == 404
+
+
+def _mark_complete(investigation_id: str, prediction: str, confidence: float, processing_time_seconds: float):
+    """Directly sets an investigation to 'complete' with known values,
+    bypassing the real Celery task/AASIST model — these tests are about
+    the search/filter/stats endpoints, not inference itself."""
+    import uuid as uuid_module
+
+    from backend.database.models.investigation import STATUS_COMPLETE, Investigation
+
+    db = TestingSessionLocal()
+    try:
+        inv = db.query(Investigation).filter(Investigation.id == uuid_module.UUID(investigation_id)).first()
+        inv.status = STATUS_COMPLETE
+        inv.prediction = prediction
+        inv.confidence = confidence
+        inv.processing_time_seconds = processing_time_seconds
+        inv.fraud_score = round(confidence * 100 if prediction == "ai_generated" else (1 - confidence) * 100, 2)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_list_investigations_search_by_filename():
+    headers = _auth_headers()
+    client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("quarterly-earnings-call.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("voicemail-from-mom.wav", _make_wav_bytes(), "audio/wav")},
+    )
+
+    response = client.get("/api/v1/investigations?search=earnings", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["filename"] == "quarterly-earnings-call.wav"
+
+
+def test_list_investigations_filter_by_status():
+    headers = _auth_headers()
+    upload_resp = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("to-complete.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    _mark_complete(upload_resp.json()["id"], "real", 0.8, 1.5)
+
+    client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("still-processing.wav", _make_wav_bytes(), "audio/wav")},
+    )
+
+    response = client.get("/api/v1/investigations?status=complete", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert all(item["status"] == "complete" for item in body["items"])
+    assert any(item["filename"] == "to-complete.wav" for item in body["items"])
+    assert not any(item["filename"] == "still-processing.wav" for item in body["items"])
+
+
+def test_list_investigations_filter_by_prediction():
+    headers = _auth_headers()
+    real_resp = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("real-one.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    fake_resp = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("fake-one.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    _mark_complete(real_resp.json()["id"], "real", 0.9, 1.0)
+    _mark_complete(fake_resp.json()["id"], "ai_generated", 0.95, 1.2)
+
+    response = client.get("/api/v1/investigations?prediction=ai_generated", headers=headers)
+    body = response.json()
+    filenames = [item["filename"] for item in body["items"]]
+    assert "fake-one.wav" in filenames
+    assert "real-one.wav" not in filenames
+
+
+def test_stats_endpoint_aggregates_correctly():
+    email = "stats-test-user@aurivo.ai"
+    client.post("/api/v1/auth/register", json={"email": email, "password": "supersecret123"})
+    login = client.post("/api/v1/auth/login", json={"email": email, "password": "supersecret123"})
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    real1 = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("stats-real-1.wav", _make_wav_bytes(), "audio/wav")},
+    ).json()["id"]
+    real2 = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("stats-real-2.wav", _make_wav_bytes(), "audio/wav")},
+    ).json()["id"]
+    fake1 = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("stats-fake-1.wav", _make_wav_bytes(), "audio/wav")},
+    ).json()["id"]
+
+    _mark_complete(real1, "real", 0.8, 1.0)
+    _mark_complete(real2, "real", 0.6, 2.0)
+    _mark_complete(fake1, "ai_generated", 0.9, 3.0)
+
+    response = client.get("/api/v1/investigations/stats", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["total_analyses"] == 3
+    assert body["today_analyses_count"] == 3
+    assert body["fraud_detected_count"] == 1
+    assert body["real_count"] == 2
+    assert abs(body["average_confidence"] - ((0.8 + 0.6 + 0.9) / 3)) < 1e-3
+    assert abs(body["average_processing_time_seconds"] - 2.0) < 1e-3
+    assert len(body["daily_uploads"]) == 14
+    assert len(body["daily_fraud_rate"]) == 14
+    assert len(body["confidence_histogram"]) == 10
+    # today's bucket (last entry, since the window is oldest -> newest) should show all 3 uploads
+    assert body["daily_uploads"][-1]["count"] == 3
+
+
+def test_stats_endpoint_requires_auth():
+    response = client.get("/api/v1/investigations/stats")
+    assert response.status_code == 401

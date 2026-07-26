@@ -7,14 +7,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt backend/requirements-worker.txt ./
-# CPU-only PyTorch — see requirements-worker.txt for why the extra index is
-# needed to avoid pulling multi-GB CUDA packages with no GPU to use them.
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir -r requirements-worker.txt \
+# --retries/--timeout: PyPI/download.pytorch.org downloads can hit
+# transient read-timeouts on slower connections — torch's wheel alone is
+# tens to hundreds of MB, making this worker image more exposed to exactly
+# this than the (smaller) backend image. Retry instead of failing the
+# whole build on one hiccup.
+RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements.txt \
+    && pip install --no-cache-dir --retries 5 --timeout 120 -r requirements-worker.txt \
        --extra-index-url https://download.pytorch.org/whl/cpu
 
 COPY backend ./backend
 COPY ml ./ml
+
+# Celery explicitly warns ("SecurityWarning: You're running the worker
+# with superuser privileges") when run as root, which the container is by
+# default. Create a dedicated user, and make sure it owns /app *before* the
+# uploads volume mount initializes — Docker seeds a fresh named volume from
+# the image's existing directory content (including ownership) the first
+# time a container using it starts.
+RUN groupadd -r aurivo && useradd -r -g aurivo -d /app aurivo \
+    && mkdir -p /app/uploads \
+    && chown -R aurivo:aurivo /app
+USER aurivo
 
 # --pool=solo: Celery's default "prefork" pool forks worker processes, and
 # PyTorch's native thread pool (OpenMP/MKL) is known to deadlock after a

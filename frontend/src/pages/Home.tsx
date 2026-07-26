@@ -15,7 +15,7 @@ export default function Home() {
   useEffect(() => {
     if (!accessToken) return;
     investigationsApi
-      .list(accessToken, 5, 0)
+      .list(accessToken, { limit: 5, offset: 0 })
       .then((res) => setRecent(res.items))
       .catch(() => setRecent([]));
   }, [accessToken]);

@@ -120,7 +120,7 @@ def test_analyze_investigation_success_updates_record():
     investigation_id = _make_investigation_with_audio()
 
     fake_result = type(
-        "PredictionResult", (), {"prediction": "ai_generated", "confidence": 0.94, "fraud_score": 94.2}
+        "PredictionResult", (), {"prediction": "ai_generated", "confidence": 0.94, "fraud_score": 94.2, "attention_regions": None}
     )()
 
     with patch("ml.inference.aasist_wrapper.predict", return_value=fake_result):
@@ -196,7 +196,7 @@ def test_analyze_investigation_generates_real_spectrogram():
     investigation_id = _make_investigation_with_audio(real_file=True, storage_key="spec-test.wav")
 
     fake_result = type(
-        "PredictionResult", (), {"prediction": "real", "confidence": 0.7, "fraud_score": 30.0}
+        "PredictionResult", (), {"prediction": "real", "confidence": 0.7, "fraud_score": 30.0, "attention_regions": None}
     )()
 
     with patch("ml.inference.aasist_wrapper.predict", return_value=fake_result):
@@ -227,7 +227,7 @@ def test_analyze_investigation_completes_even_if_spectrogram_generation_fails():
     investigation_id = _make_investigation_with_audio()  # fake_key.wav — no real file on disk
 
     fake_result = type(
-        "PredictionResult", (), {"prediction": "real", "confidence": 0.6, "fraud_score": 40.0}
+        "PredictionResult", (), {"prediction": "real", "confidence": 0.6, "fraud_score": 40.0, "attention_regions": None}
     )()
 
     with patch("ml.inference.aasist_wrapper.predict", return_value=fake_result):
@@ -238,5 +238,38 @@ def test_analyze_investigation_completes_even_if_spectrogram_generation_fails():
         investigation = db.query(Investigation).filter(Investigation.id == uuid.UUID(investigation_id)).first()
         assert investigation.status == STATUS_COMPLETE
         assert investigation.audio_metadata.spectrogram_storage_key is None
+    finally:
+        db.close()
+
+
+def test_analyze_investigation_stores_explanation_and_attention_regions():
+    """Phase 6: after a successful prediction, the task should populate
+    both ai_explanation (falls back to a template if no API key is
+    configured, which is the case in this test environment) and
+    attention_regions (passed straight through from the prediction
+    result)."""
+    investigation_id = _make_investigation_with_audio()
+
+    fake_result = type(
+        "PredictionResult",
+        (),
+        {
+            "prediction": "ai_generated",
+            "confidence": 0.88,
+            "fraud_score": 88.0,
+            "attention_regions": [{"start": 0.1, "end": 0.5, "salience": 1.0}],
+        },
+    )()
+
+    with patch("ml.inference.aasist_wrapper.predict", return_value=fake_result):
+        analyze_investigation(investigation_id)
+
+    db = TestSessionLocal()
+    try:
+        investigation = db.query(Investigation).filter(Investigation.id == uuid.UUID(investigation_id)).first()
+        assert investigation.status == STATUS_COMPLETE
+        assert investigation.ai_explanation is not None
+        assert "AI-generated" in investigation.ai_explanation
+        assert investigation.attention_regions == [{"start": 0.1, "end": 0.5, "salience": 1.0}]
     finally:
         db.close()

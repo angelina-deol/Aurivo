@@ -43,6 +43,34 @@ def _generate_spectrogram(storage, investigation) -> None:
         )
 
 
+def _generate_explanation(investigation, result) -> None:
+    """Best-effort, same as spectrogram generation — an LLM/API hiccup
+    shouldn't block an otherwise-successful investigation from completing.
+    generate_explanation() already has its own internal template fallback
+    for a missing API key or a failed call, so this basically can't raise,
+    but the try/except stays as defense in depth."""
+    try:
+        from backend.services.llm_explanation import ExplanationInput, generate_explanation
+
+        investigation.ai_explanation = generate_explanation(
+            ExplanationInput(
+                prediction=result.prediction,
+                confidence=result.confidence,
+                fraud_score=result.fraud_score,
+                duration_seconds=investigation.audio_metadata.duration_seconds,
+                sample_rate=investigation.audio_metadata.sample_rate,
+                channels=investigation.audio_metadata.channels,
+                attention_regions=result.attention_regions,
+            )
+        )
+    except Exception:
+        logger.warning(
+            "Explanation generation failed for investigation %s — continuing without it",
+            investigation.id,
+            exc_info=True,
+        )
+
+
 @celery_app.task(name="backend.workers.tasks.analyze_investigation", bind=True, max_retries=1)
 def analyze_investigation(self, investigation_id: str) -> None:
     db = SessionLocal()
@@ -103,6 +131,14 @@ def analyze_investigation(self, investigation_id: str) -> None:
         investigation.confidence = result.confidence
         investigation.fraud_score = result.fraud_score
         investigation.processing_time_seconds = round(elapsed, 3)
+        investigation.attention_regions = result.attention_regions
+
+        # Explanation generation (Phase 6) needs the prediction/confidence/
+        # fraud_score set above, so it runs after — and like spectrogram
+        # generation, is soft-failing: a bad explanation shouldn't undo an
+        # otherwise-successful, already-committed-worthy analysis.
+        _generate_explanation(investigation, result)
+
         db.commit()
     finally:
         db.close()

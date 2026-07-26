@@ -79,6 +79,12 @@ export interface AudioMetadataResponse {
   has_spectrogram: boolean;
 }
 
+export interface AttentionRegion {
+  start: number;
+  end: number;
+  salience: number;
+}
+
 export interface InvestigationResponse {
   id: string;
   filename: string;
@@ -87,6 +93,8 @@ export interface InvestigationResponse {
   confidence: number | null;
   fraud_score: number | null;
   processing_time_seconds: number | null;
+  ai_explanation: string | null;
+  attention_regions: AttentionRegion[] | null;
   created_at: string;
   updated_at: string;
   audio_metadata: AudioMetadataResponse | null;
@@ -97,6 +105,34 @@ export interface InvestigationListResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface DailyCountPoint {
+  date: string;
+  count: number;
+}
+
+export interface DailyRatePoint {
+  date: string;
+  value: number;
+}
+
+export interface HistogramBucket {
+  label: string;
+  count: number;
+}
+
+export interface InvestigationStatsResponse {
+  total_analyses: number;
+  today_analyses_count: number;
+  fraud_detected_count: number;
+  real_count: number;
+  average_confidence: number | null;
+  average_processing_time_seconds: number | null;
+  daily_uploads: DailyCountPoint[];
+  daily_fraud_rate: DailyRatePoint[];
+  daily_avg_latency: DailyRatePoint[];
+  confidence_histogram: HistogramBucket[];
 }
 
 /**
@@ -124,16 +160,26 @@ async function uploadFile(token: string, file: File): Promise<InvestigationRespo
 export const investigationsApi = {
   analyze: (token: string, file: File) => uploadFile(token, file),
 
-  list: (token: string, limit = 20, offset = 0) =>
-    request<InvestigationListResponse>(`/investigations?limit=${limit}&offset=${offset}`, {
-      token,
-    }),
+  list: (
+    token: string,
+    options: { limit?: number; offset?: number; search?: string; status?: string; prediction?: string } = {}
+  ) => {
+    const params = new URLSearchParams();
+    params.set("limit", String(options.limit ?? 20));
+    params.set("offset", String(options.offset ?? 0));
+    if (options.search) params.set("search", options.search);
+    if (options.status) params.set("status", options.status);
+    if (options.prediction) params.set("prediction", options.prediction);
+    return request<InvestigationListResponse>(`/investigations?${params.toString()}`, { token });
+  },
 
   get: (token: string, id: string) =>
     request<InvestigationResponse>(`/investigations/${id}`, { token }),
 
   remove: (token: string, id: string) =>
     request<void>(`/investigations/${id}`, { method: "DELETE", token }),
+
+  stats: (token: string) => request<InvestigationStatsResponse>("/investigations/stats", { token }),
 
   /**
    * Both the raw audio and the spectrogram image require the auth header,

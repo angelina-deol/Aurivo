@@ -10,7 +10,7 @@ those columns stay null.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, String
+from sqlalchemy import Column, DateTime, Float, ForeignKey, JSON, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -42,6 +42,14 @@ class Investigation(Base):
     confidence = Column(Float, nullable=True)
     fraud_score = Column(Float, nullable=True)
     processing_time_seconds = Column(Float, nullable=True)
+
+    # Populated in Phase 6. ai_explanation is always set on a completed
+    # investigation (template fallback if no LLM API key is configured —
+    # see services/llm_explanation.py). attention_regions is None when the
+    # attention map couldn't be captured for some reason; both are
+    # generated as soft-failure steps, same as the spectrogram.
+    ai_explanation = Column(String(2000), nullable=True)
+    attention_regions = Column(JSON, nullable=True)  # [{"start", "end", "salience"}, ...]
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

@@ -170,9 +170,20 @@ export default function InvestigationDetail() {
                   )}
 
                   {investigation.processing_time_seconds !== null && (
-                    <p className="text-center text-xs text-ink-faint">
+                    <p className="text-center text-xs text-ink-faint mb-4">
                       Analyzed in {investigation.processing_time_seconds.toFixed(1)}s
                     </p>
+                  )}
+
+                  {investigation.ai_explanation && (
+                    <div className="rounded-2xl bg-cream-100 p-4 mt-2">
+                      <p className="font-mono text-xs uppercase tracking-widest text-ink-faint mb-2">
+                        AI explanation
+                      </p>
+                      <p className="text-sm text-ink-muted leading-relaxed">
+                        {investigation.ai_explanation}
+                      </p>
+                    </div>
                   )}
                 </div>
               )}
@@ -231,7 +242,15 @@ export default function InvestigationDetail() {
                   imageUrl={spectrogramUrl}
                   durationSeconds={investigation.audio_metadata.duration_seconds}
                   sampleRate={investigation.audio_metadata.sample_rate}
+                  attentionRegions={investigation.attention_regions}
                 />
+                {investigation.attention_regions && investigation.attention_regions.length > 0 && (
+                  <p className="text-xs text-ink-faint mt-3 leading-relaxed">
+                    The highlighted regions reflect the model's first-stage internal attention,
+                    not a complete explanation of the final verdict — treat this as a hint about
+                    where the model focused, not proof of what's there.
+                  </p>
+                )}
               </Card>
             )}
           </>
