@@ -47,9 +47,6 @@ services:
         generateValue: true
       - key: SESSION_SECRET_KEY
         generateValue: true
-      # Comma-separated string, not JSON — see backend/config.py's
-      # CORS_ORIGINS_LIST for why. Set this to your real Vercel URL after
-      # the frontend is deployed.
       - key: CORS_ORIGINS
         sync: false
       - key: FRONTEND_BASE_URL
@@ -68,7 +65,10 @@ services:
     runtime: docker
     dockerfilePath: ./docker/worker.Dockerfile
     dockerContext: .
-    plan: starter  
+    # Set to `free` to avoid needing a card at all — see the RAM-risk note
+    # at the top of this file before relying on this for anything but
+    # light testing. Bump to `starter` if it OOMs on a real analysis.
+    plan: free
     envVars:
       - key: DATABASE_URL
         fromDatabase:
