@@ -116,6 +116,29 @@ def _use_test_storage_dir():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _bypass_real_subprocess_isolation(monkeypatch):
+    """These tests are about the task's DB-update logic (does it mark
+    complete/failed correctly, does it store the right fields), not about
+    subprocess isolation itself — that mechanism has its own direct tests
+    in test_subprocess_runner.py, including real crash scenarios.
+
+    This bypass is also a practical necessity, not just a scope choice:
+    run_isolated() uses multiprocessing's 'spawn' start method, which
+    pickles the target function and re-imports everything fresh in a
+    child process. unittest.mock.patch()'d MagicMocks aren't picklable
+    (confirmed directly — trying to run these tests against the real
+    run_isolated() raises PicklingError), and even a patch that somehow
+    survived pickling wouldn't apply in the child anyway, since 'spawn'
+    doesn't inherit the parent's patched module state. So mocking predict()
+    or generate_spectrogram_png() only works if the call in between goes
+    directly to the function, in-process."""
+    monkeypatch.setattr(
+        "backend.workers.tasks.run_isolated",
+        lambda fn, *args, **kwargs: fn(*args),
+    )
+
+
 def test_analyze_investigation_success_updates_record():
     investigation_id = _make_investigation_with_audio()
 
@@ -271,5 +294,47 @@ def test_analyze_investigation_stores_explanation_and_attention_regions():
         assert investigation.ai_explanation is not None
         assert "AI-generated" in investigation.ai_explanation
         assert investigation.attention_regions == [{"start": 0.1, "end": 0.5, "salience": 1.0}]
+    finally:
+        db.close()
+
+
+def test_spectrogram_generation_actually_works_through_real_subprocess_isolation(monkeypatch):
+    """Unlike every other test in this file, this one does NOT bypass
+    run_isolated — it proves the real combination (actual subprocess
+    isolation running actual spectrogram generation) works end-to-end.
+    This is possible without torch since spectrogram generation only needs
+    scipy/matplotlib, unlike AASIST prediction — which is why this calls
+    _generate_spectrogram directly rather than the full task: going
+    through analyze_investigation would also un-bypass the predict() call
+    (both share the same run_isolated reference), which would then try to
+    run real AASIST with no torch installed in this test environment."""
+    from backend.services.storage import LocalDiskStorage
+    from backend.workers.subprocess_runner import run_isolated as real_run_isolated
+    from backend.workers.tasks import _generate_spectrogram
+
+    # Override the autouse _bypass_real_subprocess_isolation fixture just
+    # for this test — monkeypatch applies fixtures before the test body
+    # runs, so this setattr happens after that bypass and take precedence
+    # for the rest of this test, then everything is restored afterward as
+    # normal for monkeypatch.
+    monkeypatch.setattr("backend.workers.tasks.run_isolated", real_run_isolated)
+
+    investigation_id = _make_investigation_with_audio(real_file=True, storage_key="real-isolation-test.wav")
+
+    db = TestSessionLocal()
+    try:
+        investigation = db.query(Investigation).filter(Investigation.id == uuid.UUID(investigation_id)).first()
+        storage = LocalDiskStorage(TEST_STORAGE_DIR)
+
+        _generate_spectrogram(storage, investigation)  # uses the real run_isolated — not mocked/bypassed
+
+        assert investigation.audio_metadata.spectrogram_storage_key is not None, (
+            "spectrogram should have been generated for real, through actual subprocess isolation"
+        )
+
+        with storage.local_path(investigation.audio_metadata.spectrogram_storage_key) as path:
+            with open(path, "rb") as f:
+                png_bytes = f.read()
+        assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n", "should be a real PNG, generated in an isolated subprocess"
     finally:
         db.close()

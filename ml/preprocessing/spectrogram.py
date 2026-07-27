@@ -17,9 +17,12 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import spectrogram as scipy_spectrogram
 
+from ml.preprocessing.audio import _prepared_for_decode
+
 
 def generate_spectrogram_png(audio_path: str) -> bytes:
-    data, sr = sf.read(audio_path, always_2d=False)
+    with _prepared_for_decode(audio_path) as safe_path:
+        data, sr = sf.read(safe_path, always_2d=False)
     if data.ndim > 1:
         data = data.mean(axis=1)  # downmix to mono for a single spectrogram
 

@@ -17,20 +17,33 @@ from backend.database.models.investigation import (
 )
 from backend.database.session import SessionLocal
 from backend.workers.celery_app import celery_app
+from backend.workers.subprocess_runner import run_isolated
 
 logger = logging.getLogger(__name__)
+
+# Both comfortably under Celery's own 300s task_time_limit and the API's
+# 360s stale-processing reconciliation window (see
+# backend/api/routes/investigations.py), so a legitimate timeout here
+# always resolves before either of those higher-level safety nets would
+# otherwise have to.
+SPECTROGRAM_TIMEOUT_SECONDS = 60
+PREDICT_TIMEOUT_SECONDS = 120
 
 
 def _generate_spectrogram(storage, investigation) -> None:
     """Best-effort — spectrogram generation failing should never block the
     investigation from completing with a real fraud prediction. Any
-    failure here is swallowed and logged, not re-raised."""
+    failure here (including a subprocess crash, now that this runs
+    isolated — see subprocess_runner.py) is swallowed and logged, not
+    re-raised."""
     try:
         from ml.preprocessing.spectrogram import generate_spectrogram_png
         from backend.services.storage import build_storage_key
 
         with storage.local_path(investigation.audio_metadata.storage_key) as path:
-            png_bytes = generate_spectrogram_png(path)
+            png_bytes = run_isolated(
+                generate_spectrogram_png, path, timeout=SPECTROGRAM_TIMEOUT_SECONDS
+            )
 
         spectrogram_key = build_storage_key(f"{investigation.id}-spectrogram.png")
         storage.save(io.BytesIO(png_bytes), spectrogram_key)
@@ -94,14 +107,23 @@ def analyze_investigation(self, investigation_id: str) -> None:
         # Everything that can fail between "processing" and "complete" is
         # inside this one try block — including getting a storage backend
         # itself. Two earlier versions of this function each left a
-        # different individual step (the ml import, then
-        # get_storage_backend() called separately for the spectrogram step)
-        # OUTSIDE any try/except, meaning a failure in just that one step
-        # left the investigation stuck at "processing" forever with no way
-        # for the frontend to ever learn something had gone wrong, since it
-        # only ever polls this row's status. Consolidating everything here,
-        # rather than trusting each step individually to remember its own
-        # try/except, is deliberate after getting bitten by that twice.
+        # different individual step OUTSIDE any try/except, meaning a
+        # failure in just that one step left the investigation stuck at
+        # "processing" forever with no way for the frontend to ever learn
+        # something had gone wrong, since it only ever polls this row's
+        # status. Consolidating everything here, rather than trusting each
+        # step individually to remember its own try/except, is deliberate
+        # after getting bitten by that twice.
+        #
+        # predict() itself now runs via run_isolated() (see
+        # subprocess_runner.py): a real, confirmed bug showed that a
+        # malformed audio file can crash the native decode path outright —
+        # not a catchable Python exception, an actual process crash. With
+        # this worker on --pool=solo (chosen to dodge a separate PyTorch
+        # fork deadlock), there's no parent process to catch that, so it
+        # used to take the entire worker down. Isolating this in a
+        # subprocess means a crash from any cause — that one, or anything
+        # not yet seen — can only kill the subprocess, never the worker.
         try:
             from backend.services.storage import get_storage_backend
             from ml.inference.aasist_wrapper import predict
@@ -118,7 +140,7 @@ def analyze_investigation(self, investigation_id: str) -> None:
             db.commit()
 
             with storage.local_path(investigation.audio_metadata.storage_key) as path:
-                result = predict(path)
+                result = run_isolated(predict, path, timeout=PREDICT_TIMEOUT_SECONDS)
         except Exception:
             investigation.status = STATUS_FAILED
             db.commit()
