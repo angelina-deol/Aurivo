@@ -1,0 +1,95 @@
+databases:
+  - name: aurivo-postgres
+    databaseName: aurivo
+    user: aurivo
+    plan: free
+
+services:
+  # Redis/Celery broker + result backend. Render renamed managed Redis to
+  # "Key Value" — type is `keyvalue` (the `redis` type still works as a
+  # deprecated alias, but `keyvalue` is the current name). ipAllowList is
+  # required for Key Value instances specifically — omitting it is a
+  # common mistake that fails validation.
+  - type: keyvalue
+    name: aurivo-redis
+    plan: free
+    ipAllowList: []  # empty = no external access; only Render services in
+                      # this Blueprint can reach it, which is all we need
+
+  - type: web
+    name: aurivo-backend
+    runtime: docker
+    dockerfilePath: ./docker/backend.Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aurivo-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: aurivo-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: aurivo-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: aurivo-redis
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: SESSION_SECRET_KEY
+        generateValue: true
+      # Comma-separated string, not JSON — see backend/config.py's
+      # CORS_ORIGINS_LIST for why. Set this to your real Vercel URL after
+      # the frontend is deployed.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: FRONTEND_BASE_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+
+  - type: worker
+    name: aurivo-worker
+    runtime: docker
+    dockerfilePath: ./docker/worker.Dockerfile
+    dockerContext: .
+    plan: starter  
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aurivo-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: aurivo-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: aurivo-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: aurivo-redis
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
