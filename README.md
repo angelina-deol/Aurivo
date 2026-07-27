@@ -33,12 +33,13 @@ I built this to go deeper than a typical ML demo — the model is only maybe a t
 The web API and the ML worker are deliberately separate services — the API never imports `torch`, and a crash during inference can't take the API down with it (inference itself runs in an isolated subprocess, for the same reason).
 
 ## Stack
-	
-Frontend:   React, TypeScript, Vite, Tailwind, Recharts
-Backend:    FastAPI, SQLAlchemy, Alembic, Celery
-ML:   PyTorch, AASIST (unmodified upstream model), scipy, matplotlib
-Infra:      Postgres, Redis, Docker Compose
-Auth: JWT + Google OAuth
+| | |
+|---|---|
+| **Frontend** | React, TypeScript, Vite, Tailwind, Recharts |
+| **Backend** | FastAPI, SQLAlchemy, Alembic, Celery |
+| **ML** | PyTorch, AASIST (unmodified upstream model), scipy, matplotlib |
+| **Infra** | Postgres, Redis, Docker Compose |
+| **Auth** | JWT + Google OAuth |
 
 
 ## A few things worth knowing
