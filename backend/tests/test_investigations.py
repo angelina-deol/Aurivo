@@ -341,3 +341,71 @@ def test_stats_endpoint_aggregates_correctly():
 def test_stats_endpoint_requires_auth():
     response = client.get("/api/v1/investigations/stats")
     assert response.status_code == 401
+
+
+def _age_investigation(investigation_id: str, seconds_ago: float):
+    """Backdates updated_at to simulate an investigation that's been
+    'processing' for a while — standing in for a worker that crashed
+    mid-task (e.g. OOM-killed) and never got the chance to mark it failed
+    itself, since a SIGKILL bypasses every try/except in the task."""
+    import uuid as uuid_module
+    from datetime import datetime, timedelta, timezone
+
+    from backend.database.models.investigation import Investigation
+
+    db = TestingSessionLocal()
+    try:
+        inv = db.query(Investigation).filter(Investigation.id == uuid_module.UUID(investigation_id)).first()
+        inv.updated_at = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_stale_processing_investigation_gets_marked_failed_on_fetch():
+    headers = _auth_headers()
+    upload_resp = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("stuck.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    investigation_id = upload_resp.json()["id"]
+    assert upload_resp.json()["status"] == "processing"
+
+    _age_investigation(investigation_id, seconds_ago=400)  # older than the 360s threshold
+
+    response = client.get(f"/api/v1/investigations/{investigation_id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+
+
+def test_recently_processing_investigation_is_not_marked_failed():
+    """A genuinely in-flight investigation (well within the time limit)
+    must not get swept up as 'stale' just for still being in progress."""
+    headers = _auth_headers()
+    upload_resp = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("still-going.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    investigation_id = upload_resp.json()["id"]
+
+    _age_investigation(investigation_id, seconds_ago=30)  # well under the 360s threshold
+
+    response = client.get(f"/api/v1/investigations/{investigation_id}", headers=headers)
+    assert response.json()["status"] == "processing"
+
+
+def test_stale_reconciliation_also_applies_in_list_endpoint():
+    headers = _auth_headers()
+    upload_resp = client.post(
+        "/api/v1/investigations/analyze",
+        headers=headers,
+        files={"file": ("stuck-in-list.wav", _make_wav_bytes(), "audio/wav")},
+    )
+    investigation_id = upload_resp.json()["id"]
+    _age_investigation(investigation_id, seconds_ago=400)
+
+    response = client.get("/api/v1/investigations?search=stuck-in-list", headers=headers)
+    body = response.json()
+    assert body["items"][0]["status"] == "failed"

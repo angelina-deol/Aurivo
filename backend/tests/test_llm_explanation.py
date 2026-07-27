@@ -1,8 +1,8 @@
 """
 Tests for backend/services/llm_explanation.py.
 
-Covers the template fallback (no API key), a mocked real API call, and the
-mocked-API-failure fallback path.
+Covers the template fallback (no API key), a mocked real API call (Groq's
+OpenAI-compatible endpoint), and the mocked-API-failure fallback path.
 """
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +23,7 @@ def _make_input(**overrides) -> ExplanationInput:
 
 
 def test_template_fallback_used_when_no_api_key(monkeypatch):
-    monkeypatch.setattr("backend.services.llm_explanation.settings.ANTHROPIC_API_KEY", None)
+    monkeypatch.setattr("backend.services.llm_explanation.settings.GROQ_API_KEY", None)
     data = _make_input()
 
     result = generate_explanation(data)
@@ -34,7 +34,7 @@ def test_template_fallback_used_when_no_api_key(monkeypatch):
 
 
 def test_template_fallback_includes_top_attention_region(monkeypatch):
-    monkeypatch.setattr("backend.services.llm_explanation.settings.ANTHROPIC_API_KEY", None)
+    monkeypatch.setattr("backend.services.llm_explanation.settings.GROQ_API_KEY", None)
     data = _make_input(
         attention_regions=[
             {"start": 0.5, "end": 1.2, "salience": 0.8},
@@ -48,28 +48,32 @@ def test_template_fallback_includes_top_attention_region(monkeypatch):
 
 
 def test_real_api_call_path_is_used_when_key_configured(monkeypatch):
-    monkeypatch.setattr("backend.services.llm_explanation.settings.ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setattr("backend.services.llm_explanation.settings.GROQ_API_KEY", "fake-key")
     data = _make_input()
 
-    fake_text_block = MagicMock()
-    fake_text_block.type = "text"
-    fake_text_block.text = "This recording shows strong signs of AI generation."
+    fake_message = MagicMock()
+    fake_message.content = "This recording shows strong signs of AI generation."
+    fake_choice = MagicMock()
+    fake_choice.message = fake_message
     fake_response = MagicMock()
-    fake_response.content = [fake_text_block]
+    fake_response.choices = [fake_choice]
 
-    with patch("anthropic.Anthropic") as MockAnthropic:
-        MockAnthropic.return_value.messages.create.return_value = fake_response
+    with patch("openai.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.return_value = fake_response
         result = generate_explanation(data)
 
     assert result == "This recording shows strong signs of AI generation."
+    # Confirms this actually points at Groq, not accidentally at OpenAI's own API.
+    _, kwargs = MockOpenAI.call_args
+    assert kwargs["base_url"] == "https://api.groq.com/openai/v1"
 
 
 def test_api_failure_falls_back_to_template(monkeypatch):
-    monkeypatch.setattr("backend.services.llm_explanation.settings.ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setattr("backend.services.llm_explanation.settings.GROQ_API_KEY", "fake-key")
     data = _make_input()
 
-    with patch("anthropic.Anthropic") as MockAnthropic:
-        MockAnthropic.return_value.messages.create.side_effect = RuntimeError("API down")
+    with patch("openai.OpenAI") as MockOpenAI:
+        MockOpenAI.return_value.chat.completions.create.side_effect = RuntimeError("API down")
         result = generate_explanation(data)
 
     assert "Template-based summary" in result

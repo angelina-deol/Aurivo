@@ -160,6 +160,33 @@ python -m celery -A backend.workers.celery_app worker --loglevel=info --pool=sol
 Without a worker running, uploads sit at `status: "processing"` forever —
 the frontend polls but nothing will ever pick the job up.
 
+**If an investigation is stuck at "processing" even with a worker
+running** — check whether the worker container actually crashed and
+restarted mid-task: `docker compose ps` shows both `CREATED` and how long
+it's actually been `Up`; if those don't match (e.g. "Created 5 minutes
+ago" but "Up About a minute"), the container restarted partway through,
+almost certainly via Docker's `restart: unless-stopped` policy after a
+crash. The most likely cause is the OS OOM-killing the worker process —
+torch + matplotlib + scipy all loaded together for one inference is a real
+memory footprint, and Docker Desktop's default VM memory allocation can be
+too small for it. Check Docker Desktop → Settings → Resources → Memory and
+increase it (aim for at least 4GB, more if you can spare it).
+
+Separately: an investigation whose worker crashed like this used to get
+stuck at "processing" *permanently* — a SIGKILL from an OOM kill bypasses
+every `try`/`except` in `backend/workers/tasks.py` entirely, so the task's
+own careful error handling never gets a chance to run. Fixed by adding a
+reconciliation check to the read path instead (`get_investigation` and
+`list_investigations` in `backend/api/routes/investigations.py`): if an
+investigation has been sitting at "processing" for longer than
+`STALE_PROCESSING_THRESHOLD_SECONDS` (360s, comfortably above Celery's own
+300s task time limit), it gets marked `failed` the next time anyone fetches
+it — no separate scheduler needed, and it runs in the API process rather
+than the worker process that might be the one that crashed. Tested: a
+backdated "processing" investigation gets marked failed on fetch, a
+recent one doesn't, and the same reconciliation applies in the list
+endpoint too.
+
 **Use `python -m celery`, not the bare `celery` command — this one is
 subtle and easy to get bitten by even with everything else configured
 correctly.** The bare `celery` console script only adds the working
@@ -332,18 +359,29 @@ Dashboard page covers what the PRD's Analytics screen describes.
 ## What's implemented in Phase 6
 
 **LLM-generated explanations** — `backend/services/llm_explanation.py`
-calls the Anthropic API, grounded *only* in real data the pipeline actually
-has (prediction, confidence, fraud score, audio metadata, attention
-regions when available). The prompt explicitly forbids inventing specific
-technical claims beyond that data — it would be easy for an LLM to
-produce a confident-sounding but fabricated detail like "spectral
-artifacts at 2.3s" with no real analysis behind it, and this is guarded
-against directly, with a regression test that the instruction stays in
-the prompt. Falls back to a plain template (not trying to sound like an
-LLM wrote it) if `ANTHROPIC_API_KEY` isn't set, or if the API call fails —
-same soft-failure pattern as spectrogram generation. Set
-`ANTHROPIC_API_KEY` and optionally `ANTHROPIC_MODEL` in `.env` to enable
-real explanations.
+calls Groq's API (via its OpenAI-compatible endpoint, using the `openai`
+SDK pointed at `https://api.groq.com/openai/v1` — Groq isn't Anthropic- or
+OpenAI-hosted, just API-compatible with OpenAI's client), grounded *only*
+in real data the pipeline actually has (prediction, confidence, fraud
+score, audio metadata, attention regions when available). The prompt
+explicitly forbids inventing specific technical claims beyond that data —
+it would be easy for an LLM to produce a confident-sounding but fabricated
+detail like "spectral artifacts at 2.3s" with no real analysis behind it,
+and this is guarded against directly, with a regression test that the
+instruction stays in the prompt. Falls back to a plain template (not
+trying to sound like an LLM wrote it) if `GROQ_API_KEY` isn't set, or if
+the API call fails — same soft-failure pattern as spectrogram generation.
+Set `GROQ_API_KEY` (get one at console.groq.com) and optionally
+`GROQ_MODEL` in `.env` to enable real explanations — defaults to
+`openai/gpt-oss-120b`, Groq's current recommendation as of when this was
+built (it deprecated the `llama-3.3-70b-versatile`/`llama-3.1-8b-instant`
+models some projects may still reference).
+
+**Note:** this used to call the Anthropic API directly; switched to Groq
+on request. If you're wondering whether to reuse an API key across
+multiple projects — don't. Separate keys mean separate usage/billing
+visibility, independent rate limits, and the ability to revoke one
+without taking down something else.
 
 **Attention-based explainability** — `ml/inference/aasist_wrapper.py` now
 captures AASIST's real internal temporal graph-attention weights via a

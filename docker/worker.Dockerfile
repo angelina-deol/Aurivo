@@ -16,6 +16,17 @@ RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements.txt \
     && pip install --no-cache-dir --retries 5 --timeout 120 -r requirements-worker.txt \
        --extra-index-url https://download.pytorch.org/whl/cpu
 
+# matplotlib scans every system font and builds a cache the first time
+# it's imported in a given environment — slow (10-30+s) in a fresh
+# container, and without a fixed/persisted cache location it pays that
+# cost again on every container restart, not just once ever. Pin the
+# cache to a directory inside /app (so the later chown covers it) and
+# pre-build it now, at image-build time, so every container started from
+# this image already has it ready.
+ENV MPLCONFIGDIR=/app/.cache/matplotlib
+RUN mkdir -p "$MPLCONFIGDIR" \
+    && python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot"
+
 COPY backend ./backend
 COPY ml ./ml
 

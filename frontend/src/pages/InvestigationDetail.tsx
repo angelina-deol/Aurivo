@@ -13,7 +13,12 @@ const POLL_INTERVAL_MS = 2500;
 // A real AASIST forward pass takes seconds, not minutes. If it's still
 // "processing" after this long, something is actually stuck (crashed
 // worker, hung task) rather than just slow — surface that honestly instead
-// of polling in silence forever.
+// of polling in silence forever. This is an early UI hint only, shown
+// while still polling; the backend's own authoritative cutoff (currently
+// 360s, in backend/api/routes/investigations.py's
+// STALE_PROCESSING_THRESHOLD_SECONDS) is what actually marks an
+// investigation failed if the worker crashed mid-task — this just warns
+// sooner than that, so the person isn't staring at silence the whole time.
 const STUCK_THRESHOLD_MS = 60_000;
 
 function formatDuration(seconds: number): string {

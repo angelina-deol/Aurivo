@@ -69,11 +69,13 @@ class Settings(BaseSettings):
     ALLOWED_AUDIO_EXTENSIONS: list[str] = [".wav", ".flac", ".mp3"]
 
     # --- LLM explanation (Phase 6) ---
-    # If unset, the explanation feature degrades to a template-based
-    # summary instead of failing investigations that would otherwise be
-    # complete — see services/llm_explanation.py.
-    ANTHROPIC_API_KEY: str | None = None
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-5"
+    # Groq's API is OpenAI-compatible (see services/llm_explanation.py) —
+    # this isn't the Anthropic API despite the model-string style. If
+    # unset, the explanation feature degrades to a template-based summary
+    # instead of failing investigations that would otherwise be complete.
+    GROQ_API_KEY: str | None = None
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
 
     # --- CORS ---
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]

@@ -35,7 +35,7 @@ class ExplanationInput:
 
 
 def _template_fallback(data: ExplanationInput) -> str:
-    """Used when no ANTHROPIC_API_KEY is configured, or the API call fails.
+    """Used when no GROQ_API_KEY is configured, or the API call fails.
     Deliberately plain and mechanical rather than trying to sound like a
     generated explanation — no reason to pretend a template is an LLM
     summary."""
@@ -54,7 +54,7 @@ def _template_fallback(data: ExplanationInput) -> str:
             f"{top['start']:.1f}s-{top['end']:.1f}s."
         )
     lines.append(
-        "(Template-based summary - set ANTHROPIC_API_KEY for a natural-language explanation.)"
+        "(Template-based summary - set GROQ_API_KEY for a natural-language explanation.)"
     )
     return " ".join(lines)
 
@@ -91,20 +91,19 @@ def _build_prompt(data: ExplanationInput) -> str:
 
 
 def generate_explanation(data: ExplanationInput) -> str:
-    if not settings.ANTHROPIC_API_KEY:
+    if not settings.GROQ_API_KEY:
         return _template_fallback(data)
 
     try:
-        import anthropic
+        import openai
 
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=settings.ANTHROPIC_MODEL,
+        client = openai.OpenAI(api_key=settings.GROQ_API_KEY, base_url=settings.GROQ_BASE_URL)
+        response = client.chat.completions.create(
+            model=settings.GROQ_MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": _build_prompt(data)}],
         )
-        text_blocks = [block.text for block in response.content if block.type == "text"]
-        explanation = "".join(text_blocks).strip()
+        explanation = (response.choices[0].message.content or "").strip()
         return explanation or _template_fallback(data)
     except Exception:
         return _template_fallback(data)

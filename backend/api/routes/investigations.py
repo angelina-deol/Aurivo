@@ -41,6 +41,36 @@ from backend.workers.tasks import analyze_investigation
 router = APIRouter(prefix="/investigations", tags=["investigations"])
 settings = get_settings()
 
+# Comfortably above celery_app.py's task_time_limit (300s) — if an
+# investigation is still "processing" after this long, the task didn't
+# just run long, it's actually gone. The most likely real-world cause:
+# the worker process got OOM-killed mid-task. A SIGKILL bypasses every
+# try/except in backend/workers/tasks.py entirely — there's no Python
+# exception to catch, the process just vanishes — so that task's own
+# error handling (however careful) can never mark the investigation
+# failed. This check lives here, in the read path, specifically because
+# it runs in the backend/API process, not the worker process that might
+# have crashed — it doesn't depend on the thing that failed still being
+# alive to report its own failure.
+STALE_PROCESSING_THRESHOLD_SECONDS = 360
+
+
+def _reconcile_if_stale(investigation: Investigation, db: Session) -> None:
+    if investigation.status not in (STATUS_PROCESSING, "awaiting_analysis"):
+        return
+
+    updated_at = investigation.updated_at
+    if updated_at.tzinfo is None:
+        # SQLite doesn't round-trip tzinfo; everything is written via
+        # datetime.utcnow(), so naive timestamps are always UTC.
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+    age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+    if age_seconds > STALE_PROCESSING_THRESHOLD_SECONDS:
+        investigation.status = STATUS_FAILED
+        db.commit()
+        db.refresh(investigation)
+
 
 def _validate_upload(file: UploadFile) -> str:
     """Returns the lowercased extension, or raises a 4xx."""
@@ -154,6 +184,10 @@ def list_investigations(
     query = query.order_by(Investigation.created_at.desc())
     total = query.count()
     items = query.offset(offset).limit(limit).all()
+
+    for inv in items:
+        _reconcile_if_stale(inv, db)
+
     return InvestigationListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -265,6 +299,7 @@ def get_investigation(
     )
     if not investigation:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Investigation not found")
+    _reconcile_if_stale(investigation, db)
     return investigation
 
 
